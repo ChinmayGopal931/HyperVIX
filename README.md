@@ -240,3 +240,4 @@ MIT License - see LICENSE file for details
 - **Discord**: [discord.gg/hypervix](https://discord.gg/hypervix)
 - **Twitter**: [@HyperVIX](https://twitter.com/HyperVIX)
 - **GitHub Issues**: Bug reports and feature requests
+# HyperVIX
