@@ -1,38 +1,38 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import "./VolatilityIndexOracle.sol";
+import "./VarianceIndexOracle.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "prb-math/UD60x18.sol";
 
 contract VolatilityPerpetual is ReentrancyGuard, Ownable {
+
     // --- Contracts & Tokens ---
-    VolatilityIndexOracle public immutable volOracle;
+    VarianceIndexOracle public immutable volOracle;
     IERC20 public immutable collateralToken;
     uint8 public immutable collateralDecimals;
     uint256 private immutable collateralScalingFactor;
 
     // --- vAMM State ---
-    uint256 public vBaseAssetReserve; // vVOL tokens
+    uint256 public vBaseAssetReserve;  // vVOL tokens
     uint256 public vQuoteAssetReserve; // Collateral tokens
 
     // --- Position Management ---
     struct Position {
         int256 size; 
-        uint256 margin; 
+        uint256 margin;
         uint256 entryPrice;
-        int256 lastCumulativeFundingRate; 
+        int256 lastCumulativeFundingRate;
     }
-
     mapping(address => Position) public positions;
     uint256 public totalPositionSize;
     uint256 private lastFundingCumulativeIndexPrice;
-
+    
     // --- Open Interest Tracking ---
-    uint256 public totalLongSize; // Total size of all long positions
-    uint256 public totalShortSize; // Total size of all short positions
+    uint256 public totalLongSize;   // Total size of all long positions
+    uint256 public totalShortSize;  // Total size of all short positions
 
     // --- Funding Rate ---
     int256 public cumulativeFundingRate;
@@ -43,23 +43,41 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     uint256 public lastMarkPriceTwapUpdate;
     uint256 private lastFundingCumulativePrice;
 
-    uint256 public maxLeverage = 10 * 1e18;
-    uint256 public maintenanceMarginRatio = 0.05 * 1e18;
+    uint256 public maxLeverage = 10 * 1e18; 
+    uint256 public maintenanceMarginRatio = 0.05 * 1e18; 
     uint256 public liquidationFee = 0.01 * 1e18; 
     uint256 public fundingInterval = 1 hours;
-    uint256 public tradingFee = 0.001 * 1e18; 
+    uint256 public tradingFee = 0.001 * 1e18;
 
     // --- Events ---
     event PositionOpened(
-        address indexed trader, int256 sizeDelta, uint256 marginDelta, uint256 averagePrice, uint256 timestamp
+        address indexed trader,
+        int256 sizeDelta,
+        uint256 marginDelta,
+        uint256 averagePrice,
+        uint256 timestamp
     );
 
-    event PositionClosed(address indexed trader, int256 size, uint256 margin, int256 pnl, uint256 timestamp);
+    event PositionClosed(
+        address indexed trader,
+        int256 size,
+        uint256 margin,
+        int256 pnl,
+        uint256 timestamp
+    );
 
-    event FundingSettled(int256 fundingRate, int256 cumulativeFundingRate, uint256 timestamp);
+    event FundingSettled(
+        int256 fundingRate,
+        int256 cumulativeFundingRate,
+        uint256 timestamp
+    );
 
     event Liquidated(
-        address indexed trader, address indexed liquidator, int256 size, uint256 liquidationReward, uint256 timestamp
+        address indexed trader,
+        address indexed liquidator,
+        int256 size,
+        uint256 liquidationReward,
+        uint256 timestamp
     );
 
     // --- Errors ---
@@ -74,7 +92,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     error InvalidAddress();
     error TransferFailed();
 
-    constructor(
+  constructor(
         address _volOracle,
         address _collateralToken,
         uint256 _initialBaseReserve,
@@ -84,25 +102,28 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         if (_collateralToken == address(0)) revert InvalidAddress();
         if (_initialBaseReserve == 0 || _initialQuoteReserve == 0) revert InvalidReserves();
 
-        volOracle = VolatilityIndexOracle(_volOracle);
+        volOracle = VarianceIndexOracle(_volOracle);
         collateralToken = IERC20(_collateralToken);
-        collateralDecimals = 6; 
-        collateralScalingFactor = 10 ** (18 - collateralDecimals); 
+        collateralDecimals = 6;
+        collateralScalingFactor = 10**(18 - collateralDecimals);
 
         vBaseAssetReserve = _initialBaseReserve;
         vQuoteAssetReserve = _initialQuoteReserve * collateralScalingFactor;
 
         lastFundingTime = block.timestamp;
-
+        
         lastMarkPriceTwapUpdate = block.timestamp;
-        cumulativeMarkPrice = 0;
+        cumulativeMarkPrice = 0; 
         lastFundingCumulativePrice = 0;
 
-        (uint256 initialCumulative,) = volOracle.getVolatilityState();
+        (uint256 initialCumulative, ) = volOracle.getVarianceState();
         lastFundingCumulativeIndexPrice = initialCumulative;
     }
 
-    function openPosition(int256 sizeDelta, uint256 marginDelta) external nonReentrant {
+    function openPosition(int256 sizeDelta, uint256 marginDelta) 
+        external 
+        nonReentrant 
+    {
         if (marginDelta == 0) revert InvalidMargin();
         if (sizeDelta == 0) revert InvalidSize();
 
@@ -114,11 +135,12 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
             revert TransferFailed();
         }
 
+        // Scale margin to 18 decimals for internal accounting
         uint256 scaledMarginDelta = marginDelta * collateralScalingFactor;
 
         uint256 quoteAssetDelta;
         uint256 averagePrice;
-
+        
         if (sizeDelta > 0) {
             (quoteAssetDelta, averagePrice) = _calculateLongTrade(uint256(sizeDelta));
         } else {
@@ -137,6 +159,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         emit PositionOpened(msg.sender, sizeDelta, marginDelta, averagePrice, block.timestamp);
     }
 
+
     function closePosition() external nonReentrant {
         _updateMarkPriceTwap();
 
@@ -148,7 +171,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
 
         uint256 quoteAssetDelta;
         uint256 exitPrice;
-
+        
         if (positionSize > 0) {
             (quoteAssetDelta, exitPrice) = _calculateShortTrade(uint256(positionSize));
         } else {
@@ -156,11 +179,6 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         }
 
         vBaseAssetReserve = uint256(int256(vBaseAssetReserve) + positionSize);
-
-        // Prevent underflow when closing positions
-        if (quoteAssetDelta > vQuoteAssetReserve) {
-            revert InvalidReserves();
-        }
         vQuoteAssetReserve -= quoteAssetDelta;
 
         int256 totalPnl = _calculatePnL(userPosition, exitPrice);
@@ -168,6 +186,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         uint256 finalCollateral = finalCollateralSigned > 0 ? uint256(finalCollateralSigned) : 0;
 
         if (finalCollateral > 0) {
+            // Un-scale collateral before transferring
             uint256 amountToTransfer = finalCollateral / collateralScalingFactor;
             if (!collateralToken.transfer(msg.sender, amountToTransfer)) {
                 revert TransferFailed();
@@ -178,8 +197,8 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         delete positions[msg.sender];
     }
 
+
     function liquidate(address user) external nonReentrant {
-        // ADDED: Update TWAP before price changes
         _updateMarkPriceTwap();
 
         Position storage position = positions[user];
@@ -191,7 +210,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
 
         uint256 quoteAssetDelta;
         uint256 exitPrice;
-
+        
         if (positionSize > 0) {
             (quoteAssetDelta, exitPrice) = _calculateShortTrade(uint256(positionSize));
         } else {
@@ -237,22 +256,22 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
             revert FundingTooEarly();
         }
 
-        _updateMarkPriceTwap();
+        _updateMarkPriceTwap(); 
 
         uint256 timeElapsed = block.timestamp - lastFundingTime;
-        if (timeElapsed == 0) return;
+        if (timeElapsed == 0) { return; }
+
 
         uint256 markPriceTwap = (cumulativeMarkPrice - lastFundingCumulativePrice) / timeElapsed;
-
-        (uint256 currentCumulativeIndex,) = volOracle.getVolatilityState();
+        
+        (uint256 currentCumulativeIndex, ) = volOracle.getVarianceState();
         uint256 indexPriceTwap = (currentCumulativeIndex - lastFundingCumulativeIndexPrice) / timeElapsed;
 
-        // --- FUNDING RATE CALCULATION ---
         int256 premium = int256(markPriceTwap) - int256(indexPriceTwap);
         int256 fundingRate = premium / 24;
 
         cumulativeFundingRate += fundingRate;
-
+        
         // --- UPDATE STATE FOR NEXT PERIOD ---
         lastFundingTime = block.timestamp;
         lastFundingCumulativePrice = cumulativeMarkPrice;
@@ -262,20 +281,21 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     }
 
     // --- Internal Functions ---
-    function _calculateLongTrade(uint256 baseAssetAmount)
-        internal
-        view
-        returns (uint256 quoteAssetDelta, uint256 averagePrice)
+    function _calculateLongTrade(uint256 baseAssetAmount) 
+        internal 
+        view 
+        returns (uint256 quoteAssetDelta, uint256 averagePrice) 
     {
+        // For buying baseAssetAmount: Δy = y * (x / (x - Δx) - 1)
         uint256 newBaseReserve = vBaseAssetReserve - baseAssetAmount;
         quoteAssetDelta = (vQuoteAssetReserve * baseAssetAmount) / newBaseReserve;
         averagePrice = (quoteAssetDelta * 1e18) / baseAssetAmount;
     }
 
-    function _calculateShortTrade(uint256 baseAssetAmount)
-        internal
-        view
-        returns (uint256 quoteAssetDelta, uint256 averagePrice)
+    function _calculateShortTrade(uint256 baseAssetAmount) 
+        internal 
+        view 
+        returns (uint256 quoteAssetDelta, uint256 averagePrice) 
     {
         uint256 newBaseReserve = vBaseAssetReserve + baseAssetAmount;
         quoteAssetDelta = (vQuoteAssetReserve * baseAssetAmount) / newBaseReserve;
@@ -288,8 +308,7 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         } else if (oldSize < 0) {
             totalShortSize -= uint256(-oldSize);
         }
-
-        // Add new position to OI tracking
+        
         if (newSize > 0) {
             totalLongSize += uint256(newSize);
         } else if (newSize < 0) {
@@ -297,11 +316,14 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         }
     }
 
-    function _updatePosition(Position storage position, int256 sizeDelta, uint256 marginDelta, uint256 tradePrice)
-        internal
-    {
+    function _updatePosition(
+        Position storage position,
+        int256 sizeDelta,
+        uint256 marginDelta,
+        uint256 tradePrice
+    ) internal {
         int256 oldSize = position.size;
-
+        
         if (position.size == 0) {
             // New position
             position.size = sizeDelta;
@@ -311,36 +333,39 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         } else {
             // Update existing position
             uint256 newSize = uint256(_abs(position.size + sizeDelta));
-
+            
             if ((position.size > 0 && sizeDelta > 0) || (position.size < 0 && sizeDelta < 0)) {
-                // Same direction - weighted average entry price
                 uint256 oldNotional = (uint256(_abs(position.size)) * position.entryPrice) / 1e18;
                 uint256 newNotional = (uint256(_abs(sizeDelta)) * tradePrice) / 1e18;
                 position.entryPrice = ((oldNotional + newNotional) * 1e18) / newSize;
             }
-
+            
             position.size += sizeDelta;
             position.margin += marginDelta;
         }
-
+        
         // Update Open Interest tracking
         _updateOpenInterest(oldSize, position.size);
     }
 
-    function _calculatePnL(Position memory position, uint256 exitPrice) internal view returns (int256) {
+    function _calculatePnL(Position memory position, uint256 exitPrice) 
+        internal 
+        view 
+        returns (int256) 
+    {
         // Price PnL
         int256 pricePnl = (int256(exitPrice) - int256(position.entryPrice)) * position.size / 1e18;
-
+        
         // Funding PnL
         int256 fundingPnl = (cumulativeFundingRate - position.lastCumulativeFundingRate) * position.size / 1e18;
-
+        
         return pricePnl - fundingPnl;
     }
 
     function _checkLeverage(Position memory position) internal view {
         uint256 markPrice = getMarkPrice();
         uint256 notionalValue = (uint256(_abs(position.size)) * markPrice) / 1e18;
-
+        
         if (notionalValue > position.margin * maxLeverage / 1e18) {
             revert ExceedsMaxLeverage();
         }
@@ -349,14 +374,14 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     function _isLiquidatable(Position memory position) internal view returns (bool) {
         uint256 markPrice = getMarkPrice();
         int256 currentPnl = _calculatePnL(position, markPrice);
-
+        
         int256 currentMarginSigned = int256(position.margin) + currentPnl;
         if (currentMarginSigned <= 0) return true;
-
+        
         uint256 currentMargin = uint256(currentMarginSigned);
         uint256 notionalValue = (uint256(_abs(position.size)) * markPrice) / 1e18;
         uint256 maintenanceMargin = (notionalValue * maintenanceMarginRatio) / 1e18;
-
+        
         return currentMargin < maintenanceMargin;
     }
 
@@ -371,15 +396,14 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
 
     function _getMarkPriceTwap(uint256 interval) internal view returns (uint256) {
         if (interval == 0) return getMarkPrice();
-
+        
         uint256 timeElapsed = block.timestamp - lastMarkPriceTwapUpdate;
         cumulativeMarkPrice + (getMarkPrice() * timeElapsed);
-
+        
         if (block.timestamp <= interval) {
             return getMarkPrice();
         }
-
-        // Simplified TWAP - in production you'd want historical checkpoints
+        
         return getMarkPrice();
     }
 
@@ -388,17 +412,14 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     }
 
     // --- View Functions ---
-
     function getMarkPrice() public view returns (uint256) {
-        // Both reserves are now in 18 decimals for internal consistency
-        // Return price in 18 decimals: quote/base
         return (vQuoteAssetReserve * 1e18) / vBaseAssetReserve;
     }
 
     function getPositionValue(address trader) external view returns (int256) {
         Position memory position = positions[trader];
         if (position.size == 0) return 0;
-
+        
         uint256 markPrice = getMarkPrice();
         return _calculatePnL(position, markPrice);
     }
@@ -406,11 +427,9 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     function isLiquidatable(address trader) external view returns (bool) {
         Position memory position = positions[trader];
         if (position.size == 0) return false;
-
+        
         return _isLiquidatable(position);
     }
-
-    // --- Comprehensive Position Details ---
 
     struct PositionDetails {
         int256 size;
@@ -418,8 +437,8 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         uint256 entryPrice;
         int256 unrealizedPnl;
         uint256 notionalValue;
-        uint256 leverage;
-        uint256 marginRatio; 
+        uint256 leverage;    
+        uint256 marginRatio;    
         bool isLiquidatable;
         uint256 markPrice;
     }
@@ -433,12 +452,12 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
         uint256 markPrice = getMarkPrice();
         int256 pnl = _calculatePnL(pos, markPrice);
         uint256 notional = (uint256(_abs(pos.size)) * markPrice) / 1e18;
-
+        
         // Calculate current margin (initial margin + unrealized PnL)
         int256 currentMarginSigned = int256(pos.margin) + pnl;
         uint256 marginRatio = 0;
         uint256 leverage = 0;
-
+        
         if (currentMarginSigned > 0 && notional > 0) {
             marginRatio = (uint256(currentMarginSigned) * 1e18) / notional;
             leverage = (notional * 1e18) / uint256(currentMarginSigned);
@@ -461,27 +480,25 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
     }
 
     // --- Open Interest View Functions ---
-    function getTotalOpenInterest()
-        external
-        view
-        returns (uint256 totalLongs, uint256 totalShorts, uint256 netExposure)
-    {
+    function getTotalOpenInterest() external view returns (uint256 totalLongs, uint256 totalShorts, uint256 netExposure) {
         totalLongs = totalLongSize;
         totalShorts = totalShortSize;
-        netExposure = totalLongs > totalShorts ? totalLongs - totalShorts : totalShorts - totalLongs;
+        netExposure = totalLongs > totalShorts ? 
+            totalLongs - totalShorts : 
+            totalShorts - totalLongs;
     }
 
     // --- Trade Preview and Slippage ---
-    function getTradePreview(int256 sizeDelta)
-        external
-        view
-        returns (uint256 averagePrice, uint256 priceImpact, uint256 tradingFeeCost)
+    function getTradePreview(int256 sizeDelta) 
+        external 
+        view 
+        returns (uint256 averagePrice, uint256 priceImpact, uint256 tradingFeeCost) 
     {
         if (sizeDelta == 0) return (0, 0, 0);
 
         uint256 initialPrice = getMarkPrice();
         uint256 quoteAssetDelta;
-
+        
         if (sizeDelta > 0) {
             (quoteAssetDelta, averagePrice) = _calculateLongTrade(uint256(sizeDelta));
         } else {
@@ -501,40 +518,38 @@ contract VolatilityPerpetual is ReentrancyGuard, Ownable {
 
     function getRequiredMargin(int256 sizeDelta) external view returns (uint256 minMarginRequired) {
         if (sizeDelta == 0) return 0;
-
+        
         uint256 quoteAssetDelta;
         uint256 averagePrice;
-
+        
         if (sizeDelta > 0) {
             (quoteAssetDelta, averagePrice) = _calculateLongTrade(uint256(sizeDelta));
         } else {
             (quoteAssetDelta, averagePrice) = _calculateShortTrade(uint256(-sizeDelta));
         }
-
-        // Add trading fee
+        
         uint256 tradingFeeCost = (quoteAssetDelta * tradingFee) / 1e18;
         uint256 totalCost = quoteAssetDelta + tradingFeeCost;
-
-        // Minimum margin is totalCost / maxLeverage
+        
         minMarginRequired = (totalCost * 1e18) / maxLeverage;
     }
 
     function getLiquidationPrice(address trader) external view returns (uint256 liquidationPrice) {
         Position memory pos = positions[trader];
         if (pos.size == 0) return 0;
-
+        
         int256 sizeAbs = int256(_abs(pos.size));
         int256 marginSigned = int256(pos.margin);
         int256 entryPriceSigned = int256(pos.entryPrice);
         int256 maintenanceRatio = int256(maintenanceMarginRatio);
-
+        
         int256 coefficient = (pos.size * 1e18) - (sizeAbs * maintenanceRatio);
         int256 constantTerm = (entryPriceSigned * pos.size) - (marginSigned * 1e18);
-
+        
         if (coefficient == 0) return 0; // Edge case
-
+        
         int256 liquidationPriceSigned = constantTerm / coefficient;
-
+        
         return liquidationPriceSigned > 0 ? uint256(liquidationPriceSigned) : 0;
     }
 }

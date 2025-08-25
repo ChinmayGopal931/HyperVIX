@@ -4,12 +4,12 @@ const { ethers } = require('ethers');
 require('dotenv').config();
 
 // Contract addresses from latest deployment
-const CONTRACTS = {
-    VolatilityIndexOracle: "0xf97c968671597bAfEb810CE0725f01B3B5d6E85C",
-    VolatilityPerpetual: "0x55602697DEa2A67b69d6c689d760B7cDf33d4459", 
-    HyperVIXKeeper: "0x37F9185C52fAC766895285360f2EbBE9Ab814e61",
-    MockUSDC: "0xC0A997E52C5f452C6105Da24caeb52F485f9A72B"
-};
+  const CONTRACTS = {
+    VolatilityIndexOracle: "0x42336C82c4e727D98d37C626edF24eC44794157a",
+    VolatilityPerpetual:   "0x4734c15878ff8f7EFd4a7D81A316B348808Ee7D7",
+    HyperVIXKeeper:        "0xEe2722216acaC9700cebFe4F8998E29d4a16CeE7",
+    MockUSDC:              "0xeA852122fFcADE7345761317b5465776a85Caa39"
+  }
 
 // Hyperliquid testnet RPC
 const RPC_URL = process.env.RPC_URL || "https://rpc.hyperliquid-testnet.xyz/evm";
@@ -31,6 +31,12 @@ const ORACLE_ABI = [
     "function takePriceSnapshot() external",
     "function getLastUpdateTime() external view returns (uint256)",
     "function getAnnualizedVolatility() external view returns (uint256)"
+];
+
+const PERPETUAL_ABI = [
+    "function settleFunding() external",
+    "function lastFundingTime() external view returns (uint256)",
+    "function fundingInterval() external view returns (uint256)"
 ];
 
 class HyperVIXKeeper {
@@ -55,8 +61,14 @@ class HyperVIXKeeper {
             this.wallet
         );
         
+        this.perpetualContract = new ethers.Contract(
+            CONTRACTS.VolatilityPerpetual,
+            PERPETUAL_ABI,
+            this.wallet
+        );
+        
         this.isRunning = false;
-        this.UPDATE_INTERVAL = 60000; // 60 seconds (slower to avoid rate limits)
+        this.UPDATE_INTERVAL = 15000; // 60 seconds (slower to avoid rate limits)
         this.FUNDING_INTERVAL = 3600000; // 1 hour
     }
 
@@ -108,7 +120,8 @@ class HyperVIXKeeper {
         try {
             console.log("📈 Updating oracle...");
             const tx = await this.keeperContract.updateOracle({
-                gasLimit: 500000
+                gasLimit: 500000,
+                gasPrice: 500000000 // 0.5 gwei
             });
             
             console.log("  Transaction:", tx.hash);
@@ -132,7 +145,8 @@ class HyperVIXKeeper {
         try {
             console.log("💰 Settling funding...");
             const tx = await this.keeperContract.settleFunding({
-                gasLimit: 500000
+                gasLimit: 500000,
+                gasPrice: 500000000 // 0.5 gwei
             });
             
             console.log("  Transaction:", tx.hash);
@@ -152,13 +166,16 @@ class HyperVIXKeeper {
     }
 
     async checkAndUpdate() {
-        const now = Date.now();
-        const currentTime = Math.floor(now / 1000);
         
         try {
             // Check if updates are due
             const oracleUpdateDue = await this.retryCall(() => this.keeperContract.isOracleUpdateDue());
-            const fundingUpdateDue = await this.retryCall(() => this.keeperContract.isFundingUpdateDue());
+            
+            // Check funding directly from perpetual
+            const lastFundingTime = await this.retryCall(() => this.perpetualContract.lastFundingTime());
+            const fundingInterval = await this.retryCall(() => this.perpetualContract.fundingInterval());
+            const currentTime = Math.floor(Date.now() / 1000);
+            const fundingUpdateDue = currentTime >= (Number(lastFundingTime) + Number(fundingInterval));
             
             console.log(`⏰ [${new Date().toISOString()}] Checking system...`);
             console.log(`  Oracle update due: ${oracleUpdateDue}`);
@@ -180,25 +197,54 @@ class HyperVIXKeeper {
 
     async updateBoth() {
         try {
-            console.log("🔄 Running updateBoth() - will update oracle and/or funding as needed...");
-            const tx = await this.keeperContract.updateBoth({
-                gasLimit: 1000000
-            });
+            console.log("🔄 Running direct updates (oracle & funding)...");
             
-            console.log("  Transaction:", tx.hash);
-            const receipt = await tx.wait();
+            let oracleSuccess = false;
+            let fundingSuccess = false;
             
-            if (receipt.status === 1) {
-                console.log("  ✅ Update completed successfully");
-                
-                // Show updated VIX
-                const newVIX = await this.oracleContract.getAnnualizedVolatility();
-                console.log("  Current VIX:", ethers.formatUnits(newVIX, 18));
-                return true;
-            } else {
-                console.log("  ❌ Transaction failed");
-                return false;
+            // Update oracle directly
+            const oracleUpdateDue = await this.retryCall(() => this.keeperContract.isOracleUpdateDue());
+            if (oracleUpdateDue) {
+                console.log("  📈 Updating oracle directly...");
+                const oracleTx = await this.oracleContract.takePriceSnapshot({
+                    gasLimit: 500000,
+                    gasPrice: 500000000
+                });
+                console.log("    Oracle TX:", oracleTx.hash);
+                const oracleReceipt = await oracleTx.wait();
+                oracleSuccess = oracleReceipt.status === 1;
+                console.log(oracleSuccess ? "    ✅ Oracle updated" : "    ❌ Oracle failed");
             }
+            
+            // Check funding directly from perpetual contract
+            const lastFundingTime = await this.retryCall(() => this.perpetualContract.lastFundingTime());
+            const fundingInterval = await this.retryCall(() => this.perpetualContract.fundingInterval());
+            const currentTime = Math.floor(Date.now() / 1000);
+            const fundingUpdateDue = currentTime >= (Number(lastFundingTime) + Number(fundingInterval));
+            
+            if (fundingUpdateDue) {
+                console.log("  💰 Settling funding directly...");
+                const fundingTx = await this.perpetualContract.settleFunding({
+                    gasLimit: 500000,
+                    gasPrice: 500000000
+                });
+                console.log("    Funding TX:", fundingTx.hash);
+                const fundingReceipt = await fundingTx.wait();
+                fundingSuccess = fundingReceipt.status === 1;
+                console.log(fundingSuccess ? "    ✅ Funding settled" : "    ❌ Funding failed");
+            }
+            
+            if (!oracleUpdateDue && !fundingUpdateDue) {
+                console.log("  ✅ No updates needed");
+                return true;
+            }
+            
+            // Show updated VIX
+            const newVIX = await this.oracleContract.getAnnualizedVolatility();
+            console.log("  Current VIX:", ethers.formatUnits(newVIX, 18));
+            
+            return (oracleUpdateDue ? oracleSuccess : true) && (fundingUpdateDue ? fundingSuccess : true);
+            
         } catch (error) {
             console.log("  ⚠️ Update failed:", error.message);
             return false;

@@ -17,9 +17,9 @@ contract DeployComplete is Script {
     uint256 constant ANNUALIZATION_FACTOR = 365 * 24; // Hourly updates
     uint256 constant INITIAL_VARIANCE = 0.04 * 1e18; // 20% annualized volatility
     
-    // vAMM initial reserves
-    uint256 constant INITIAL_BASE_RESERVE = 1_000_000e18; // 1M vVOL
-    uint256 constant INITIAL_QUOTE_RESERVE = 200_000e6;   // 200K USDC (6 decimals)
+    // vAMM initial reserves - MUCH LARGER for realistic trading
+    uint256 constant INITIAL_BASE_RESERVE = 10_000_000e18; // 10M vVOL
+    uint256 constant INITIAL_QUOTE_RESERVE = 2_000_000e6;   // 20 USDC (6 decimals)
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");

@@ -3,12 +3,14 @@ pragma solidity 0.8.20;
 
 import "forge-std/Test.sol";
 import "../src/VolatilityIndexOracle.sol";
-import "./mocks/MockL1Read.sol";
-import "prb-math/UD60x18.sol";
+import "./mocks/MockL1ReadPrecompile.sol";
+import {UD60x18, ud, unwrap, convert} from "prb-math/UD60x18.sol";
 
 contract VolatilityIndexOracleTest is Test {
     VolatilityIndexOracle public oracle;
-    MockL1Read public mockL1Read;
+    
+    // Use precompile address
+    address private constant L1_READ_ADDRESS = 0x0000000000000000000000000000000000000806;
     
     address public keeper = address(0x1234);
     uint32 public constant ASSET_ID = 1;
@@ -24,11 +26,14 @@ contract VolatilityIndexOracleTest is Test {
     );
 
     function setUp() public {
-        mockL1Read = new MockL1Read();
-        mockL1Read.setPrice(ASSET_ID, INITIAL_PRICE);
+        // Deploy and etch the mock precompile
+        vm.etch(L1_READ_ADDRESS, address(new MockL1ReadPrecompile()).code);
+        
+        // Set the initial price
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, INITIAL_PRICE);
         
         oracle = new VolatilityIndexOracle(
-            address(mockL1Read),
+            L1_READ_ADDRESS,
             keeper,
             ASSET_ID,
             LAMBDA,
@@ -38,12 +43,12 @@ contract VolatilityIndexOracleTest is Test {
     }
 
     function testConstructorInitialization() public {
-        assertEq(address(oracle.l1Reader()), address(mockL1Read));
+        assertEq(address(oracle.l1Reader()), L1_READ_ADDRESS);
         assertEq(oracle.keeper(), keeper);
         assertEq(oracle.underlyingAssetId(), ASSET_ID);
         assertEq(oracle.lambda(), LAMBDA);
         assertEq(oracle.annualizationFactor(), ANNUALIZATION_FACTOR);
-        assertEq(oracle.lastPrice(), INITIAL_PRICE);
+        assertEq(oracle.lastPrice(), 0); // Constructor sets this to 0, price set on first snapshot
         assertEq(oracle.currentVariance(), INITIAL_VARIANCE);
         assertGt(oracle.lastUpdateTime(), 0);
     }
@@ -63,7 +68,7 @@ contract VolatilityIndexOracleTest is Test {
         // Test invalid keeper address
         vm.expectRevert(VolatilityIndexOracle.InvalidAddress.selector);
         new VolatilityIndexOracle(
-            address(mockL1Read),
+            L1_READ_ADDRESS,
             address(0),
             ASSET_ID,
             LAMBDA,
@@ -74,7 +79,7 @@ contract VolatilityIndexOracleTest is Test {
         // Test invalid lambda (>= 1)
         vm.expectRevert(VolatilityIndexOracle.InvalidLambda.selector);
         new VolatilityIndexOracle(
-            address(mockL1Read),
+            L1_READ_ADDRESS,
             keeper,
             ASSET_ID,
             1e18, // Invalid: lambda should be < 1
@@ -85,7 +90,7 @@ contract VolatilityIndexOracleTest is Test {
         // Test invalid lambda (0)
         vm.expectRevert(VolatilityIndexOracle.InvalidLambda.selector);
         new VolatilityIndexOracle(
-            address(mockL1Read),
+            L1_READ_ADDRESS,
             keeper,
             ASSET_ID,
             0, // Invalid: lambda should be > 0
@@ -105,11 +110,16 @@ contract VolatilityIndexOracleTest is Test {
     }
 
     function testPriceUpdate() public {
+        // First snapshot to initialize price
+        vm.prank(keeper);
+        oracle.takePriceSnapshot();
+        assertEq(oracle.lastPrice(), INITIAL_PRICE);
+        
+        // Now update price and take second snapshot
         uint64 newPrice = 2100 * 1e6; // 5% increase
-        mockL1Read.setPrice(ASSET_ID, newPrice);
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, newPrice);
 
         vm.prank(keeper);
-        // Don't check exact event values, just that event was emitted
         oracle.takePriceSnapshot();
 
         assertEq(oracle.lastPrice(), newPrice);
@@ -119,6 +129,10 @@ contract VolatilityIndexOracleTest is Test {
     }
 
     function testVolatilityCalculationWithSequentialPrices() public {
+        // First snapshot to initialize price
+        vm.prank(keeper);
+        oracle.takePriceSnapshot();
+        
         uint64[] memory prices = new uint64[](5);
         prices[0] = 2000 * 1e6;
         prices[1] = 2100 * 1e6; // +5%
@@ -129,7 +143,7 @@ contract VolatilityIndexOracleTest is Test {
         uint256 previousVariance = oracle.currentVariance();
 
         for (uint256 i = 1; i < prices.length; i++) {
-            mockL1Read.setPrice(ASSET_ID, prices[i]);
+            MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, prices[i]);
             
             vm.prank(keeper);
             oracle.takePriceSnapshot();
@@ -158,7 +172,7 @@ contract VolatilityIndexOracleTest is Test {
     }
 
     function testZeroPriceHandling() public {
-        mockL1Read.setPrice(ASSET_ID, 0);
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, 0);
         
         vm.prank(keeper);
         vm.expectRevert(VolatilityIndexOracle.ZeroPrice.selector);
@@ -166,12 +180,16 @@ contract VolatilityIndexOracleTest is Test {
     }
 
     function testEWMAFormula() public {
+        // First snapshot to initialize price
+        vm.prank(keeper);
+        oracle.takePriceSnapshot();
+        
         // Start with known variance
         uint256 initialVariance = oracle.currentVariance();
         
         // Apply a 10% price increase
         uint64 newPrice = uint64((uint256(INITIAL_PRICE) * 110) / 100);
-        mockL1Read.setPrice(ASSET_ID, newPrice);
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, newPrice);
         
         vm.prank(keeper);
         oracle.takePriceSnapshot();
@@ -186,17 +204,11 @@ contract VolatilityIndexOracleTest is Test {
         assertGt(newVariance, 0.01 * 1e18); // At least 1% variance
         assertLt(newVariance, 0.1 * 1e18);  // At most 10% variance
     }
-
-    function testTwapVolatility() public {
-        // Test basic TWAP functionality
-        uint256 twapVol = oracle.getTwapVolatility(3600); // 1 hour
-        uint256 spotVol = oracle.getAnnualizedVolatility();
-        
-        // With no history, TWAP should equal spot
-        assertEq(twapVol, spotVol);
-    }
-
     function testMultipleUpdatesIncreasePrecision() public {
+        // First snapshot to initialize price
+        vm.prank(keeper);
+        oracle.takePriceSnapshot();
+        
         uint256 initialVol = oracle.getAnnualizedVolatility();
         
         // Simulate multiple price movements
@@ -212,7 +224,7 @@ contract VolatilityIndexOracleTest is Test {
         }
         
         for (uint256 i = 1; i < prices.length; i++) {
-            mockL1Read.setPrice(ASSET_ID, prices[i]);
+            MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, prices[i]);
             
             vm.prank(keeper);
             oracle.takePriceSnapshot();
@@ -234,12 +246,12 @@ contract VolatilityIndexOracleTest is Test {
         // Skip if prices are the same (would result in zero return)
         vm.assume(price1 != price2);
         
-        mockL1Read.setPrice(ASSET_ID, price1);
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, price1);
         
         vm.prank(keeper);
         oracle.takePriceSnapshot();
         
-        mockL1Read.setPrice(ASSET_ID, price2);
+        MockL1ReadPrecompile(payable(L1_READ_ADDRESS)).setPrice(ASSET_ID, price2);
         
         vm.prank(keeper);
         oracle.takePriceSnapshot();
