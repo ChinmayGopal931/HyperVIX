@@ -1,7 +1,7 @@
 # HyperVIX
 
 HyperVIX is a decentralized protocol enabling traders to speculate on the future realized volatility of crypto assets through synthetic perpetual markets. The protocol tracks real-time, on-chain volatility indices using a virtual AMM (vAMM) system.
-![Uploading WhatsApp Image 2025-08-24 at 11.37.40.jpeg…]()
+![WhatsApp Image 2025-08-24 at 11 37 40](https://github.com/user-attachments/assets/637332a2-041a-472c-a3bf-7012b1ea0463)
 
 
 
